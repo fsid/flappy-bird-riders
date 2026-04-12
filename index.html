@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flappy Tahira</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #111827;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}
+canvas {
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  border: 3px solid #374151;
+  box-shadow: 0 0 48px rgba(112, 197, 206, 0.25);
+  cursor: pointer;
+}
+</style>
+</head>
+<body>
+<canvas id="c" width="360" height="600"></canvas>
+<script>
+// ── Setup ─────────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+let activeCtx = ctx;   // swapped during icon generation
+
+const W = 360, H = 600;
+const GROUND     = H - 62;
+const GRAVITY    = 0.46;
+const FLAP_VEL   = -8.4;
+const BOOK_W     = 52;
+const BOOK_GAP   = 144;
+const BOOK_SPD   = 2.4;
+const BOOK_INT   = 1800;   // ms between spawns
+const BIRD_X     = 70;     // fixed horizontal position (left edge of bird)
+const BIRD_W     = 34;
+const BIRD_H     = 24;
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let mode      = 'title';   // 'title' | 'play' | 'dead'
+let score     = 0;
+let best      = +localStorage.getItem('ft_hi') || 0;
+let tick      = 0;
+
+let by        = H / 2 - BIRD_H / 2;  // top edge of bird body
+let bvy       = 0;
+let flapTimer = 0;
+
+let pipes     = [];   // { x, gapY, passed }
+let nextPipe  = 0;
+let groundOff = 0;
+
+const clouds = [
+  { x: 50,  y: 75,  w: 72 },
+  { x: 240, y: 52,  w: 58 },
+  { x: 320, y: 100, w: 50 },
+];
+
+const BOOK_COLORS = [
+  '#e74c3c','#3498db','#27ae60','#f39c12',
+  '#8e44ad','#1abc9c','#e67e22','#c0392b',
+  '#2980b9','#e91e63','#16a085','#f1c40f'
+];
+
+// ── Audio (Web Audio API — zero external files) ───────────────────────────────
+let audioCtx = null;
+let muted    = false;
+
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+// Core helper: plays one oscillator note with an exponential frequency sweep + gain fade-out
+function tone(type, freqStart, freqEnd, gainAmt, dur, when) {
+  if (muted || !audioCtx) return;
+  const osc  = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.type = type;
+  const t = when ?? audioCtx.currentTime;
+  osc.frequency.setValueAtTime(freqStart, t);
+  if (freqEnd && freqEnd !== freqStart)
+    osc.frequency.exponentialRampToValueAtTime(freqEnd, t + dur);
+  gain.gain.setValueAtTime(gainAmt, t);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.start(t);
+  osc.stop(t + dur + 0.02);
+}
+
+// Wing flap — short upward sweep (square wave chirp)
+function sndFlap() {
+  ensureAudio();
+  tone('square', 370, 540, 0.16, 0.09);
+}
+
+// Score point — cheerful two-note chime (C → G)
+function sndScore() {
+  ensureAudio();
+  const t = audioCtx.currentTime;
+  tone('square', 523, 523, 0.20, 0.08, t);
+  tone('square', 784, 784, 0.20, 0.11, t + 0.08);
+}
+
+// Collision impact — buzzy sawtooth thud
+function sndHit() {
+  ensureAudio();
+  tone('sawtooth', 240, 55, 0.40, 0.22);
+}
+
+// Death jingle — three descending square-wave notes
+function sndDie() {
+  ensureAudio();
+  const t = audioCtx.currentTime;
+  [[392, 0.10], [330, 0.10], [220, 0.18]].forEach(([f, d], i) => {
+    tone('square', f, f * 0.80, 0.22, d, t + i * 0.13);
+  });
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function box(c, x, y, w, h) {
+  activeCtx.fillStyle = c;
+  activeCtx.fillRect(x|0, y|0, w|0, h|0);
+}
+
+function bright(hex, n) {
+  const v = parseInt(hex.slice(1), 16);
+  const cl = x => Math.min(255, Math.max(0, x));
+  return `rgb(${cl((v>>16)+n)},${cl(((v>>8)&255)+n)},${cl((v&255)+n)})`;
+}
+
+function label(text, x, y, size, fill, stroke) {
+  activeCtx.font = `bold ${size}px "Courier New",monospace`;
+  activeCtx.textAlign = 'center';
+  if (stroke) { activeCtx.strokeStyle = stroke; activeCtx.lineWidth = 4; activeCtx.strokeText(text, x, y); }
+  activeCtx.fillStyle = fill;
+  activeCtx.fillText(text, x, y);
+}
+
+// ── Draw character (bird + Tahira) ────────────────────────────────────────────
+// bx = left edge of bird body, g = top edge of bird body
+function drawChar(bx, g, showLabel = true) {
+
+  // ── Girl — Tahira ──────────────────────────────────────
+
+  // Long black hair (volume + flowing drapes)
+  box('#0d0d0d', bx+5,  g-28, 18,  4);   // hair crown
+  box('#111111', bx+3,  g-24, 22, 17);   // hair main mass
+  box('#0a0a0a', bx+1,  g-13,  6, 17);   // left drape along face
+  box('#0a0a0a', bx+22, g-13,  6, 17);   // right drape along face
+  box('#0d0d0d', bx-5,  g-18,  7, 22);   // hair flowing behind bird
+
+  // Face
+  box('#f5c8a0', bx+8,  g-23, 14, 14);
+
+  // Eyes (dark almond)
+  box('#1a0a00', bx+10, g-20,  3, 3);
+  box('#1a0a00', bx+17, g-20,  3, 3);
+  box('#ffffff', bx+10, g-20,  1, 1);    // shine L
+  box('#ffffff', bx+17, g-20,  1, 1);    // shine R
+
+  // Brows
+  box('#0d0d0d', bx+10, g-22,  4, 2);
+  box('#0d0d0d', bx+17, g-22,  4, 2);
+
+  // Mouth
+  box('#c07060', bx+11, g-14,  6, 2);
+
+  // Neck
+  box('#f5c8a0', bx+12, g-10,  5,  6);
+
+  // Dress — crimson red with puff sleeves
+  box('#c0304a', bx+8,  g-4,  14, 12);   // torso
+  box('#a02040', bx+5,  g-3,   5, 10);   // left puff sleeve
+  box('#a02040', bx+20, g-3,   5, 10);   // right puff sleeve
+
+  // Arms (skin)
+  box('#f5c8a0', bx+3,  g-1,   5,  9);
+  box('#f5c8a0', bx+22, g-1,   5,  9);
+  // Hands
+  box('#f5c8a0', bx+2,  g+7,   5,  4);
+  box('#f5c8a0', bx+23, g+7,   5,  4);
+
+  // Legs dangling over sides of bird (blue trousers visible below dress hem)
+  box('#2255aa', bx+8,  g+8,   5, 13);
+  box('#2255aa', bx+17, g+8,   5, 13);
+
+  // Shoes
+  box('#1a1a1a', bx+6,  g+21,  8,  4);
+  box('#1a1a1a', bx+16, g+21,  8,  4);
+
+  // ── Bird ──────────────────────────────────────────────
+
+  // Tail feathers
+  box('#c8a000', bx-9,  g+8,  11,  8);
+  box('#e0b200', bx-7,  g+13,  8,  5);
+
+  // Wing (lifts on flap, droops otherwise)
+  const wo = flapTimer > 0 ? -6 : 5;
+  box('#e8b000', bx+2,  g+6+wo, 17, 10);
+
+  // Body
+  box('#f7c948', bx,    g,       BIRD_W,   BIRD_H);
+  box('#f7c948', bx+3,  g-2,     BIRD_W-6,  4);     // top arc
+  box('#f7c948', bx+3,  g+BIRD_H, BIRD_W-6, 3);     // bottom arc
+
+  // Belly patch
+  box('#fffbd4', bx+16, g+5,    14, 14);
+
+  // Eye
+  box('#ffffff', bx+21, g+3,     9,  9);
+  box('#111111', bx+23, g+5,     6,  6);
+  box('#ffffff', bx+25, g+5,     2,  2);             // shine
+
+  // Beak (two-tone)
+  box('#f08020', bx+BIRD_W,   g+7,  10,  5);
+  box('#c06010', bx+BIRD_W,   g+12, 10,  3);
+
+  // Floating name tag (hidden in icon)
+  if (showLabel) label('Tahira', bx + BIRD_W/2, g-34, 10, '#ffffff', '#2c2c2c');
+}
+
+// ── Draw book obstacles ───────────────────────────────────────────────────────
+const SPINE = 16;
+
+function drawTopBooks(bx, height) {
+  // Stacked books from y=0 down to `height`
+  for (let y = 0, i = 0; y < height - SPINE*2; y += SPINE, i++) {
+    const c = BOOK_COLORS[i % BOOK_COLORS.length];
+    box(c,            bx,   y,        BOOK_W, SPINE-1);
+    box(bright(c,55), bx+3, y+2,      BOOK_W-6, SPINE-7);
+    box('#1a1a1a',    bx,   y+SPINE-1, BOOK_W, 1);
+  }
+  // Wooden endcap at base of top stack
+  box('#5d4037', bx-5, height-SPINE*2, BOOK_W+10, SPINE*2);
+  box('#795548', bx-5, height-SPINE*2, BOOK_W+10,  5);
+  box('#3e2723', bx-5, height-4,       BOOK_W+10,  4);
+}
+
+function drawBotBooks(bx, startY) {
+  // Wooden endcap at top of bottom stack
+  box('#5d4037', bx-5, startY,            BOOK_W+10, SPINE*2);
+  box('#795548', bx-5, startY,            BOOK_W+10,  5);
+  box('#3e2723', bx-5, startY+SPINE*2-4,  BOOK_W+10,  4);
+  // Stacked books from below endcap down to ground
+  for (let y = startY+SPINE*2, i = 0; y < GROUND; y += SPINE, i++) {
+    const c = BOOK_COLORS[(i+5) % BOOK_COLORS.length];
+    box(c,            bx,   y,        BOOK_W, SPINE-1);
+    box(bright(c,55), bx+3, y+2,      BOOK_W-6, SPINE-7);
+    box('#1a1a1a',    bx,   y+SPINE-1, BOOK_W, 1);
+  }
+}
+
+// ── Draw scenery ──────────────────────────────────────────────────────────────
+function drawSky() {
+  box('#70c5ce', 0,  0,  W, H);
+  box('#a8dde6', 0,  0,  W, 90);
+  box('#84ccd8', 0, 70,  W, 35);
+}
+
+function drawCloud(x, y, w) {
+  box('#f4faff', x + (w*0.2)|0, y,    (w*0.6)|0, 11);
+  box('#f4faff', x,             y+8,  w,         15);
+  box('#ddeefa', x+4,           y+10, w-8,       11);
+}
+
+function drawGround() {
+  box('#5b8a3b', 0, GROUND,     W,  8);
+  box('#4a7030', 0, GROUND+6,   W,  5);
+  box('#c8a555', 0, GROUND+11,  W, H-GROUND-11);
+  // Scrolling dirt texture
+  const off = ((-groundOff % 28) + 28) % 28;
+  for (let gx = off - 28; gx < W; gx += 28) {
+    box('#b89440', gx|0, GROUND+17, 14, 4);
+  }
+}
+
+// ── Physics / logic ───────────────────────────────────────────────────────────
+function tap() {
+  ensureAudio();                         // resume AudioContext on any user gesture
+  if (mode === 'title') {
+    mode      = 'play';
+    bvy       = FLAP_VEL;
+    flapTimer = 10;
+    nextPipe  = Date.now() + 600;
+    sndFlap();
+  } else if (mode === 'play') {
+    bvy       = FLAP_VEL;
+    flapTimer = 10;
+    sndFlap();
+  } else if (mode === 'dead') {
+    restart();
+  }
+}
+
+function restart() {
+  by        = H / 2 - BIRD_H / 2;
+  bvy       = 0;
+  flapTimer = 0;
+  pipes     = [];
+  score     = 0;
+  tick      = 0;
+  groundOff = 0;
+  mode      = 'title';
+}
+
+function update() {
+  tick++;
+
+  // Bird physics runs in both 'play' and 'dead' modes
+  if (mode === 'play' || mode === 'dead') {
+    bvy += GRAVITY;
+    by  += bvy;
+    if (flapTimer > 0) flapTimer--;
+  }
+
+  // Clamp to ground when dead (fall-and-thud effect)
+  if (mode === 'dead') {
+    if (by + BIRD_H >= GROUND) { by = GROUND - BIRD_H; bvy = 0; }
+    return;
+  }
+  if (mode !== 'play') return;
+
+  groundOff += BOOK_SPD;
+
+  // Scroll clouds
+  clouds.forEach(c => {
+    c.x -= 0.35;
+    if (c.x + c.w < 0) c.x = W + 10;
+  });
+
+  // Spawn obstacles
+  if (Date.now() > nextPipe) {
+    const gapY = 90 + Math.random() * (GROUND - BOOK_GAP - 120);
+    pipes.push({ x: W + 10, gapY, passed: false });
+    nextPipe = Date.now() + BOOK_INT;
+  }
+
+  // Move obstacles + score
+  pipes.forEach(p => {
+    p.x -= BOOK_SPD;
+    if (!p.passed && p.x + BOOK_W < BIRD_X) {
+      p.passed = true;
+      score++;
+      sndScore();
+      if (score > best) { best = score; localStorage.setItem('ft_hi', best); }
+    }
+  });
+  pipes = pipes.filter(p => p.x + BOOK_W > -20);
+
+  if (checkCollide()) {
+    mode = 'dead';
+    sndHit();
+    setTimeout(sndDie, 180);
+  }
+}
+
+function checkCollide() {
+  // Ground / ceiling
+  if (by + BIRD_H >= GROUND) return true;
+  if (by - 20 <= 0)          return true;
+
+  // Slightly inset hitbox for fair play
+  const left  = BIRD_X + 4;
+  const right = BIRD_X + BIRD_W - 4;
+  const top   = by - 12;       // just below Tahira's chin area
+  const bot   = by + BIRD_H - 2;
+
+  for (const p of pipes) {
+    if (right > p.x + 3 && left < p.x + BOOK_W - 3) {
+      if (top < p.gapY)              return true;
+      if (bot > p.gapY + BOOK_GAP)  return true;
+    }
+  }
+  return false;
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function render() {
+  drawSky();
+  clouds.forEach(c => drawCloud(c.x, c.y, c.w));
+
+  pipes.forEach(p => {
+    drawTopBooks(p.x, p.gapY);
+    drawBotBooks(p.x, p.gapY + BOOK_GAP);
+  });
+
+  drawGround();
+  drawChar(BIRD_X, by);
+
+  // Score
+  if (mode === 'play' || mode === 'dead') {
+    label(score, W/2, 52, 32, '#ffffff', '#2c2c2c');
+  }
+
+  // Mute button (always visible, top-right)
+  drawMuteBtn();
+
+  // ── Title screen ──
+  if (mode === 'title') {
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(0, 0, W, H);
+
+    label('FLAPPY', W/2, H/2 - 58, 40, '#ffffff', '#1a1a1a');
+    label('TAHIRA', W/2, H/2 -  8, 40, '#f7c948', '#1a1a1a');
+
+    const p = 0.65 + 0.35 * Math.sin(tick * 0.065);
+    ctx.globalAlpha = p;
+    label('SPACE  /  tap  to  play', W/2, H/2 + 42, 14, '#ffffff');
+    ctx.globalAlpha = 1;
+    if (best > 0) label('Best: ' + best, W/2, H/2 + 70, 13, '#f7c948');
+  }
+
+  // ── Game over screen ──
+  if (mode === 'dead') {
+    ctx.fillStyle = 'rgba(0,0,0,0.48)';
+    ctx.fillRect(0, 0, W, H);
+
+    const px = W/2 - 118, py = H/2 - 98;
+    // Panel
+    box('#f7c948', px,     py,     236, 196);
+    box('#e8a000', px,     py,     236,   7);
+    box('#e8a000', px,     py+189, 236,   7);
+    box('#c88000', px,     py+7,     5, 182);
+    box('#c88000', px+231, py+7,     5, 182);
+
+    label('GAME  OVER', W/2, py + 50,  22, '#1a1a1a');
+
+    // Score rows
+    label('Score :  ' + score, W/2, py + 90,  16, '#333333');
+    label('Best  :  ' + best,  W/2, py + 116, 16, '#333333');
+
+    const p2 = 0.65 + 0.35 * Math.sin(tick * 0.09);
+    ctx.globalAlpha = p2;
+    label('Space / tap to retry', W/2, py + 162, 13, '#333333');
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ── Mute button ───────────────────────────────────────────────────────────────
+const MUTE_X = W - 38, MUTE_Y = 8, MUTE_S = 28;
+
+function drawMuteBtn() {
+  // Background pill
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath();
+  ctx.roundRect(MUTE_X, MUTE_Y, MUTE_S, MUTE_S, 6);
+  ctx.fill();
+  // Icon (pixel speaker drawn with rects)
+  const ix = MUTE_X + 7, iy = MUTE_Y + 8;
+  box('#ffffff', ix,   iy+2, 4, 8);   // speaker body
+  box('#ffffff', ix+4, iy,   4, 12);  // speaker cone
+  if (!muted) {
+    // Sound waves
+    box('#ffffff', ix+10, iy+2, 2, 2);
+    box('#ffffff', ix+10, iy+8, 2, 2);
+    box('#ffffff', ix+13, iy,   2, 4);
+    box('#ffffff', ix+13, iy+8, 2, 4);
+  } else {
+    // X mark
+    box('#ff6666', ix+10, iy+2,  8, 2);
+    box('#ff6666', ix+10, iy+8,  8, 2);
+    box('#ff6666', ix+14, iy+4,  2, 4);
+    box('#ff6666', ix+10, iy+4,  2, 4);
+  }
+}
+
+function isMuteBtn(mx, my) {
+  return mx >= MUTE_X && mx <= MUTE_X + MUTE_S &&
+         my >= MUTE_Y && my <= MUTE_Y + MUTE_S;
+}
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key === 'm' || e.key === 'M') { muted = !muted; return; }
+  if (e.key === ' ' || e.key === 'ArrowUp') { e.preventDefault(); tap(); }
+});
+
+canvas.addEventListener('click', e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) * (W / rect.width);
+  const my = (e.clientY - rect.top)  * (H / rect.height);
+  if (isMuteBtn(mx, my)) { muted = !muted; return; }
+  tap();
+});
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const rect  = canvas.getBoundingClientRect();
+  const touch = e.touches[0];
+  const mx = (touch.clientX - rect.left) * (W / rect.width);
+  const my = (touch.clientY - rect.top)  * (H / rect.height);
+  if (isMuteBtn(mx, my)) { muted = !muted; return; }
+  tap();
+}, { passive: false });
+
+// ── PWA icon + manifest (all inline, no external files) ──────────────────────
+
+// Draws the Tahira+bird pixel-art icon onto an offscreen canvas and returns a data URL.
+// SCALE is always an integer so the pixel art stays perfectly crisp.
+function generateIcon(size) {
+  const ic = document.createElement('canvas');
+  ic.width = ic.height = size;
+  const ictx = ic.getContext('2d');
+  ictx.imageSmoothingEnabled = false;
+
+  // Sky-blue gradient background
+  const grad = ictx.createLinearGradient(0, 0, 0, size);
+  grad.addColorStop(0,   '#a8dde6');
+  grad.addColorStop(0.7, '#70c5ce');
+  grad.addColorStop(1,   '#5bbbc8');
+  ictx.fillStyle = grad;
+  ictx.fillRect(0, 0, size, size);
+
+  // Integer pixel scale: 512→8×, 192→3×, 64→1×
+  const SCALE = Math.max(1, Math.round(size / 64));
+
+  // Character natural bounds (no label):
+  //   X: bx-9  …  bx+44  (53 px wide),  centre = bx+17.5
+  //   Y: g-28  …  g+25   (53 px tall),  centre = g-1.5
+  // We want that centre at (size/2, size/2) in canvas pixels:
+  const bx = Math.round(size / 2 / SCALE - 17.5);
+  const g  = Math.round(size / 2 / SCALE +  1.5);
+
+  activeCtx = ictx;
+  ictx.save();
+  ictx.scale(SCALE, SCALE);
+  drawChar(bx, g, false);   // false = skip floating "Tahira" text
+  ictx.restore();
+  activeCtx = ctx;
+
+  return ic.toDataURL('image/png');
+}
+
+function setupPWA() {
+  const icon512 = generateIcon(512);
+  const icon192 = generateIcon(192);
+  const icon64  = generateIcon(64);   // favicon
+
+  // ── Web App Manifest (blob URL works from file:// and http://) ──
+  const manifest = {
+    name:             'Flappy Tahira',
+    short_name:       'Flappy Tahira',
+    description:      'Fly through books with Tahira!',
+    start_url:        '.',
+    display:          'fullscreen',
+    orientation:      'portrait',
+    background_color: '#111827',
+    theme_color:      '#70c5ce',
+    icons: [
+      { src: icon192, sizes: '192x192', type: 'image/png' },
+      { src: icon512, sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
+    ]
+  };
+  const mBlob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
+  const mLink = document.createElement('link');
+  mLink.rel  = 'manifest';
+  mLink.href = URL.createObjectURL(mBlob);
+  document.head.appendChild(mLink);
+
+  // ── iOS "Add to Home Screen" meta tags ──
+  [
+    ['apple-mobile-web-app-capable',          'yes'],
+    ['apple-mobile-web-app-status-bar-style', 'black-translucent'],
+    ['apple-mobile-web-app-title',            'Flappy Tahira'],
+  ].forEach(([name, content]) => {
+    const m = document.createElement('meta');
+    m.name = name; m.content = content;
+    document.head.appendChild(m);
+  });
+
+  // Apple touch icon (the image iOS uses for the shortcut tile)
+  const al = document.createElement('link');
+  al.rel  = 'apple-touch-icon';
+  al.href = icon192;
+  document.head.appendChild(al);
+
+  // Browser tab favicon
+  const fl = document.createElement('link');
+  fl.rel  = 'icon';
+  fl.type = 'image/png';
+  fl.href = icon64;
+  document.head.appendChild(fl);
+}
+
+// ── Loop ──────────────────────────────────────────────────────────────────────
+function loop() {
+  update();
+  render();
+  requestAnimationFrame(loop);
+}
+
+setupPWA();   // inject icon + manifest before first frame
+loop();
+</script>
+</body>
+</html>
