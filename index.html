@@ -148,85 +148,80 @@ function label(text, x, y, size, fill, stroke) {
 
 // ── Draw character (bird + Tahira) ────────────────────────────────────────────
 // bx = left edge of bird body, g = top edge of bird body
+//
+// Girl sits over the LEFT half of the bird (bx+1..bx+15) so the
+// eye (bx+21) and belly (bx+16) are fully clear.
+//
+// Layer order (back → front):
+//   1. Hair behind + tail
+//   2. Bird body
+//   3. Belly / eye / beak
+//   4. Girl — hair, face, compact body
+//   5. Bent back arm  (upper-arm down, forearm forward like gripping)
+//   6. Bent back leg  (thigh back, shin down, shoe pointing back)
+//   7. Wing           (drawn last — always in front of the leg)
+//
 function drawChar(bx, g, showLabel = true) {
 
-  // ── Girl — Tahira ──────────────────────────────────────
+  // ── 1. Behind the bird ───────────────────────────────────────────────────
+  box('#0d0d0d', bx-4,  g-14,  6, 20);   // hair flowing behind bird
 
-  // Long black hair (volume + flowing drapes)
-  box('#0d0d0d', bx+5,  g-28, 18,  4);   // hair crown
-  box('#111111', bx+3,  g-24, 22, 17);   // hair main mass
-  box('#0a0a0a', bx+1,  g-13,  6, 17);   // left drape along face
-  box('#0a0a0a', bx+22, g-13,  6, 17);   // right drape along face
-  box('#0d0d0d', bx-5,  g-18,  7, 22);   // hair flowing behind bird
+  box('#c8a000', bx-9,  g+8,  11,  8);   // tail base
+  box('#e0b200', bx-7,  g+13,  8,  5);   // tail tip
 
-  // Face
-  box('#f5c8a0', bx+8,  g-23, 14, 14);
+  // ── 2. Bird body ─────────────────────────────────────────────────────────
+  box('#f7c948', bx,   g,        BIRD_W,   BIRD_H);
+  box('#f7c948', bx+3, g-2,      BIRD_W-6,  4);   // top arc
+  box('#f7c948', bx+3, g+BIRD_H, BIRD_W-6,  3);   // bottom arc
 
-  // Eyes (dark almond)
-  box('#1a0a00', bx+10, g-20,  3, 3);
-  box('#1a0a00', bx+17, g-20,  3, 3);
-  box('#ffffff', bx+10, g-20,  1, 1);    // shine L
-  box('#ffffff', bx+17, g-20,  1, 1);    // shine R
+  // ── 3. Bird surface detail (right half — fully clear of girl) ────────────
+  box('#fffbd4', bx+16, g+5,  14, 14);             // belly
+  box('#ffffff', bx+21, g+3,   9,  9);             // eye white
+  box('#111111', bx+23, g+5,   6,  6);             // pupil
+  box('#ffffff', bx+25, g+5,   2,  2);             // eye shine
+  box('#f08020', bx+BIRD_W, g+7,  10,  5);         // beak top
+  box('#c06010', bx+BIRD_W, g+12, 10,  3);         // beak bottom
 
-  // Brows
-  box('#0d0d0d', bx+10, g-22,  4, 2);
-  box('#0d0d0d', bx+17, g-22,  4, 2);
+  // ── 4. Girl — original big head, shifted left 7 px to clear the eye ────────
+  //         Body stays compact.  Eye (bx+21) is fully unobstructed.
 
-  // Mouth
-  box('#c07060', bx+11, g-14,  6, 2);
+  // Hair — same pixel counts as the original, just -7 on every x offset
+  box('#0d0d0d', bx-2,  g-28, 18,  4);   // crown
+  box('#111111', bx-4,  g-24, 22, 17);   // main mass
+  box('#0a0a0a', bx-6,  g-13,  6, 17);   // back drape
+  box('#0a0a0a', bx+15, g-13,  5, 12);   // front drape (ends bx+20, 1 px before eye)
 
-  // Neck
-  box('#f5c8a0', bx+12, g-10,  5,  6);
+  // Face  (bx+1 → bx+15 — same 14 px wide as original)
+  box('#f5c8a0', bx+1,  g-23, 14, 14);
+  box('#0d0d0d', bx+3,  g-22,  4,  2);   // back brow
+  box('#0d0d0d', bx+10, g-22,  4,  2);   // front brow
+  box('#1a0a00', bx+3,  g-20,  3,  3);   // back eye
+  box('#1a0a00', bx+10, g-20,  3,  3);   // front eye
+  box('#ffffff', bx+3,  g-20,  1,  1);   // shine
+  box('#ffffff', bx+10, g-20,  1,  1);
+  box('#c07060', bx+4,  g-14,  6,  2);   // mouth
+  box('#f5c8a0', bx+5,  g-10,  5,  8);   // neck (tall enough to bridge to dress)
 
-  // Dress — crimson red with puff sleeves
-  box('#c0304a', bx+8,  g-4,  14, 12);   // torso
-  box('#a02040', bx+5,  g-3,   5, 10);   // left puff sleeve
-  box('#a02040', bx+20, g-3,   5, 10);   // right puff sleeve
+  // Dress — compact torso only, no big skirt
+  box('#c0304a', bx+1,  g-2,  12,  7);   // torso
+  box('#a02040', bx-1,  g-1,   4,  6);   // back sleeve cap
 
-  // Arms (skin)
-  box('#f5c8a0', bx+3,  g-1,   5,  9);
-  box('#f5c8a0', bx+22, g-1,   5,  9);
-  // Hands
-  box('#f5c8a0', bx+2,  g+7,   5,  4);
-  box('#f5c8a0', bx+23, g+7,   5,  4);
+  // ── 5. Bent back arm — upper arm ↓ then forearm → (gripping forward) ────
+  box('#f5c8a0', bx-1,  g+4,   3,  5);   // upper arm going down
+  box('#f5c8a0', bx-1,  g+8,   8,  3);   // forearm going right (forward)
+  box('#f5c8a0', bx+6,  g+6,   3,  4);   // hand gripping
 
-  // Legs dangling over sides of bird (blue trousers visible below dress hem)
-  box('#2255aa', bx+8,  g+8,   5, 13);
-  box('#2255aa', bx+17, g+8,   5, 13);
+  // ── 6. Bent back leg — thigh ← then shin ↓ then shoe ← (tuck-back) ─────
+  box('#2255aa', bx+1,  g+5,   6,  4);   // thigh going back under dress
+  box('#2255aa', bx-1,  g+9,   4,  5);   // shin going down
+  box('#1a1a1a', bx-3,  g+13,  7,  3);   // shoe pointing back
 
-  // Shoes
-  box('#1a1a1a', bx+6,  g+21,  8,  4);
-  box('#1a1a1a', bx+16, g+21,  8,  4);
+  // ── 7. Wing — drawn last so it overlaps the leg ──────────────────────────
+  const wingY = flapTimer > 0 ? g + 6 : g + 14;
+  box('#d4a000', bx+1,  wingY,     16, 9);
+  box('#c09000', bx+3,  wingY + 2, 10, 5);
 
-  // ── Bird ──────────────────────────────────────────────
-
-  // Tail feathers
-  box('#c8a000', bx-9,  g+8,  11,  8);
-  box('#e0b200', bx-7,  g+13,  8,  5);
-
-  // Wing (lifts on flap, droops otherwise)
-  const wo = flapTimer > 0 ? -6 : 5;
-  box('#e8b000', bx+2,  g+6+wo, 17, 10);
-
-  // Body
-  box('#f7c948', bx,    g,       BIRD_W,   BIRD_H);
-  box('#f7c948', bx+3,  g-2,     BIRD_W-6,  4);     // top arc
-  box('#f7c948', bx+3,  g+BIRD_H, BIRD_W-6, 3);     // bottom arc
-
-  // Belly patch
-  box('#fffbd4', bx+16, g+5,    14, 14);
-
-  // Eye
-  box('#ffffff', bx+21, g+3,     9,  9);
-  box('#111111', bx+23, g+5,     6,  6);
-  box('#ffffff', bx+25, g+5,     2,  2);             // shine
-
-  // Beak (two-tone)
-  box('#f08020', bx+BIRD_W,   g+7,  10,  5);
-  box('#c06010', bx+BIRD_W,   g+12, 10,  3);
-
-  // Floating name tag (hidden in icon)
-  if (showLabel) label('Tahira', bx + BIRD_W/2, g-34, 10, '#ffffff', '#2c2c2c');
+  if (showLabel) label('Tahira', bx + 8, g - 34, 10, '#ffffff', '#2c2c2c');
 }
 
 // ── Draw book obstacles ───────────────────────────────────────────────────────
