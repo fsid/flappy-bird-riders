@@ -107,10 +107,22 @@ const BOOK_COLORS = [
 // ── Audio (Web Audio API — zero external files) ───────────────────────────────
 let audioCtx = null;
 let muted    = false;
+let audioReadyPromise = null;
+let audioReady = false;
 
 function ensureAudio() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+  if (audioCtx.state === 'running') {
+    audioReady = true;
+    return Promise.resolve();
+  }
+  if (audioCtx.state === 'suspended' && !audioReadyPromise) {
+    audioReadyPromise = audioCtx.resume()
+      .then(() => { audioReady = audioCtx.state === 'running'; })
+      .catch(() => {})
+      .finally(() => { audioReadyPromise = null; });
+  }
+  return audioReadyPromise || Promise.resolve();
 }
 
 // Core helper: plays one oscillator note with an exponential frequency sweep + gain fade-out
@@ -121,7 +133,8 @@ function tone(type, freqStart, freqEnd, gainAmt, dur, when) {
   osc.connect(gain);
   gain.connect(audioCtx.destination);
   osc.type = type;
-  const t = when ?? audioCtx.currentTime;
+  const now = audioCtx.currentTime;
+  const t = Math.max(when ?? now, now + 0.001);
   osc.frequency.setValueAtTime(freqStart, t);
   if (freqEnd && freqEnd !== freqStart)
     osc.frequency.exponentialRampToValueAtTime(freqEnd, t + dur);
@@ -133,30 +146,30 @@ function tone(type, freqStart, freqEnd, gainAmt, dur, when) {
 
 // Wing flap — short upward sweep (square wave chirp)
 function sndFlap() {
-  ensureAudio();
-  tone('square', 370, 540, 0.16, 0.09);
+  ensureAudio().then(() => tone('square', 370, 540, 0.16, 0.09));
 }
 
 // Score point — cheerful two-note chime (C → G)
 function sndScore() {
-  ensureAudio();
-  const t = audioCtx.currentTime;
-  tone('square', 523, 523, 0.20, 0.08, t);
-  tone('square', 784, 784, 0.20, 0.11, t + 0.08);
+  ensureAudio().then(() => {
+    const t = audioCtx.currentTime;
+    tone('square', 523, 523, 0.20, 0.08, t);
+    tone('square', 784, 784, 0.20, 0.11, t + 0.08);
+  });
 }
 
 // Collision impact — buzzy sawtooth thud
 function sndHit() {
-  ensureAudio();
-  tone('sawtooth', 240, 55, 0.40, 0.22);
+  ensureAudio().then(() => tone('sawtooth', 240, 55, 0.40, 0.22));
 }
 
 // Death jingle — three descending square-wave notes
 function sndDie() {
-  ensureAudio();
-  const t = audioCtx.currentTime;
-  [[392, 0.10], [330, 0.10], [220, 0.18]].forEach(([f, d], i) => {
-    tone('square', f, f * 0.80, 0.22, d, t + i * 0.13);
+  ensureAudio().then(() => {
+    const t = audioCtx.currentTime;
+    [[392, 0.10], [330, 0.10], [220, 0.18]].forEach(([f, d], i) => {
+      tone('square', f, f * 0.80, 0.22, d, t + i * 0.13);
+    });
   });
 }
 
