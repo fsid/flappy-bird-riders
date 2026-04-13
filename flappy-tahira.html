@@ -32,7 +32,7 @@ canvas {
   box-shadow: 0 0 48px rgba(112, 197, 206, 0.25);
   cursor: pointer;
   touch-action: none;
-  width: min(92vw, calc((100vh - 24px) * 0.6), 420px);
+  width: min(calc(100vw - 24px), calc((100vh - 24px) * 0.6));
   aspect-ratio: var(--game-ratio);
   height: auto;
   max-height: calc(100vh - 24px);
@@ -659,14 +659,29 @@ function setupPWA() {
 }
 
 // ── Loop ──────────────────────────────────────────────────────────────────────
-function loop() {
-  update();
+const TARGET_FPS = 60;
+const FRAME_MS = 1000 / TARGET_FPS;
+const MAX_FRAME_MS = 250;
+let framePrevTs = 0;
+let frameAccum = 0;
+
+function loop(ts) {
+  if (!framePrevTs) framePrevTs = ts;
+  const dt = Math.min(ts - framePrevTs, MAX_FRAME_MS);
+  framePrevTs = ts;
+
+  frameAccum += dt;
+  while (frameAccum >= FRAME_MS) {
+    update();
+    frameAccum -= FRAME_MS;
+  }
+
   render();
   requestAnimationFrame(loop);
 }
 
 setupPWA();   // inject icon + manifest before first frame
-loop();
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
