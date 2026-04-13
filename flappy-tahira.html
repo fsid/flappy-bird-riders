@@ -83,6 +83,7 @@ let mode      = 'title';   // 'title' | 'play' | 'dead'
 let score     = 0;
 let best      = loadBestScore('ft_hi');
 let tick      = 0;
+let newBest   = false;
 
 let by        = H / 2 - BIRD_H / 2;  // top edge of bird body
 let bvy       = 0;
@@ -91,6 +92,10 @@ let flapTimer = 0;
 let pipes     = [];   // { x, gapY, passed }
 let nextPipe  = 0;
 let groundOff = 0;
+
+// Confetti particles
+let confetti  = [];
+let deadTick  = 0;
 
 const clouds = [
   { x: 50,  y: 75,  w: 72 },
@@ -229,6 +234,65 @@ function sndDie() {
   });
 }
 
+function sndFanfare() {
+  whenAudioReady(() => {
+    const t = audioCtx.currentTime;
+    const notes = [523, 659, 784, 1047];
+    notes.forEach((f, i) => {
+      tone('square',   f, f, 0.18, 0.14, t + i * 0.12);
+      tone('triangle', f, f, 0.12, 0.14, t + i * 0.12);
+    });
+    tone('square',   1047, 1047, 0.22, 0.35, t + 0.48);
+    tone('triangle', 1047, 1047, 0.14, 0.35, t + 0.48);
+    tone('sawtooth', 523,  523,  0.06, 0.35, t + 0.48);
+  });
+}
+
+function spawnConfetti() {
+  confetti = [];
+  const colors = ['#ff4444','#44ff44','#4488ff','#ffdd44','#ff44ff','#44ffff','#ff8800','#ffffff'];
+  for (let i = 0; i < 80; i++) {
+    confetti.push({
+      x: Math.random() * W,
+      y: -10 - Math.random() * 200,
+      vx: (Math.random() - 0.5) * 3,
+      vy: 1.5 + Math.random() * 3,
+      w: 3 + Math.random() * 5,
+      h: 3 + Math.random() * 5,
+      rot: Math.random() * Math.PI * 2,
+      rotV: (Math.random() - 0.5) * 0.2,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      life: 180 + Math.floor(Math.random() * 120)
+    });
+  }
+}
+
+function updateConfetti() {
+  for (let i = confetti.length - 1; i >= 0; i--) {
+    const c = confetti[i];
+    c.x += c.vx;
+    c.y += c.vy;
+    c.vy += 0.03;
+    c.vx *= 0.99;
+    c.rot += c.rotV;
+    c.life--;
+    if (c.life <= 0 || c.y > H + 20) confetti.splice(i, 1);
+  }
+}
+
+function drawConfetti() {
+  confetti.forEach(c => {
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.rot);
+    ctx.globalAlpha = Math.min(1, c.life / 30);
+    ctx.fillStyle = c.color;
+    ctx.fillRect(-c.w / 2, -c.h / 2, c.w, c.h);
+    ctx.restore();
+  });
+  ctx.globalAlpha = 1;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function box(c, x, y, w, h) {
   activeCtx.fillStyle = c;
@@ -255,10 +319,10 @@ function roundedRectPath(context, x, y, w, h, r) {
   context.closePath();
 }
 
-function label(text, x, y, size, fill, stroke) {
+function label(text, x, y, size, fill, stroke, lineW) {
   activeCtx.font = `bold ${size}px "Courier New",monospace`;
   activeCtx.textAlign = 'center';
-  if (stroke) { activeCtx.strokeStyle = stroke; activeCtx.lineWidth = 4; activeCtx.strokeText(text, x, y); }
+  if (stroke) { activeCtx.strokeStyle = stroke; activeCtx.lineWidth = lineW || 4; activeCtx.lineJoin = 'round'; activeCtx.strokeText(text, x, y); }
   activeCtx.fillStyle = fill;
   activeCtx.fillText(text, x, y);
 }
@@ -278,7 +342,7 @@ function label(text, x, y, size, fill, stroke) {
 //   6. Bent back leg  (thigh back, shin down, shoe pointing back)
 //   7. Wing           (drawn last — always in front of the leg)
 //
-function drawChar(bx, g, showLabel = true) {
+function drawChar(bx, g, showLabel = true, isDead = false) {
 
   // ── 1. Behind the bird ───────────────────────────────────────────────────
   box('#0d0d0d', bx-4,  g-14,  6, 20);   // hair flowing behind bird
@@ -293,9 +357,17 @@ function drawChar(bx, g, showLabel = true) {
 
   // ── 3. Bird surface detail (right half — fully clear of girl) ────────────
   box('#fffbd4', bx+16, g+5,  14, 14);             // belly
-  box('#ffffff', bx+21, g+3,   9,  9);             // eye white
-  box('#111111', bx+23, g+5,   6,  6);             // pupil
-  box('#ffffff', bx+25, g+5,   2,  2);             // eye shine
+  if (isDead) {
+    // Bird dazed eyes — half-closed, swirly
+    box('#ffffff', bx+21, g+3, 9, 9);
+    box('#111111', bx+22, g+6, 7, 4);
+    box('#ffffff', bx+21, g+3, 9, 3);
+    box('#444444', bx+24, g+7, 3, 2);
+  } else {
+    box('#ffffff', bx+21, g+3,   9,  9);             // eye white
+    box('#111111', bx+23, g+5,   6,  6);             // pupil
+    box('#ffffff', bx+25, g+5,   2,  2);             // eye shine
+  }
   box('#f08020', bx+BIRD_W, g+7,  10,  5);         // beak top
   box('#c06010', bx+BIRD_W, g+12, 10,  3);         // beak bottom
 
@@ -310,13 +382,29 @@ function drawChar(bx, g, showLabel = true) {
 
   // Face  (bx+1 → bx+15 — same 14 px wide as original)
   box('#f5c8a0', bx+1,  g-23, 14, 14);
-  box('#0d0d0d', bx+3,  g-22,  4,  2);   // back brow
-  box('#0d0d0d', bx+10, g-22,  4,  2);   // front brow
-  box('#1a0a00', bx+3,  g-20,  3,  3);   // back eye
-  box('#1a0a00', bx+10, g-20,  3,  3);   // front eye
-  box('#ffffff', bx+3,  g-20,  1,  1);   // shine
-  box('#ffffff', bx+10, g-20,  1,  1);
-  box('#c07060', bx+4,  g-14,  6,  2);   // mouth
+
+  if (isDead) {
+    // Brows raised/worried
+    box('#0d0d0d', bx+3,  g-23,  4,  2);
+    box('#0d0d0d', bx+10, g-23,  4,  2);
+    // Half-lidded worried eyes — squinting but visible
+    box('#1a0a00', bx+3,  g-19,  3,  3);
+    box('#1a0a00', bx+10, g-19,  3,  3);
+    box('#f5c8a0', bx+3,  g-19,  3,  1);
+    box('#ffffff', bx+3,  g-18,  1,  1);
+    box('#ffffff', bx+10, g-18,  1,  1);
+    // "Oh" mouth — round open
+    box('#cc4444', bx+5,  g-15,  4,  4);
+    box('#f5c8a0', bx+6,  g-14,  2,  2);
+  } else {
+    box('#0d0d0d', bx+3,  g-22,  4,  2);   // back brow
+    box('#0d0d0d', bx+10, g-22,  4,  2);   // front brow
+    box('#1a0a00', bx+3,  g-20,  3,  3);   // back eye
+    box('#1a0a00', bx+10, g-20,  3,  3);   // front eye
+    box('#ffffff', bx+3,  g-20,  1,  1);   // shine
+    box('#ffffff', bx+10, g-20,  1,  1);
+    box('#c07060', bx+4,  g-14,  6,  2);   // mouth
+  }
   box('#f5c8a0', bx+5,  g-10,  5,  8);   // neck (tall enough to bridge to dress)
 
   // Dress — compact torso only, no big skirt
@@ -421,6 +509,9 @@ function restart() {
   score     = 0;
   tick      = 0;
   groundOff = 0;
+  newBest   = false;
+  confetti  = [];
+  deadTick  = 0;
   mode      = 'title';
 }
 
@@ -437,6 +528,8 @@ function update() {
   // Clamp to ground when dead (fall-and-thud effect)
   if (mode === 'dead') {
     if (by + BIRD_H >= GROUND) { by = GROUND - BIRD_H; bvy = 0; }
+    deadTick++;
+    updateConfetti();
     return;
   }
   if (mode !== 'play') return;
@@ -469,9 +562,11 @@ function update() {
   pipes = pipes.filter(p => p.x + BOOK_W > -20);
 
   if (checkCollide()) {
-    mode = 'dead';
-    sndHit();
-    setTimeout(sndDie, 180);
+    mode = 'dead'; deadTick = 0; sndHit(); setTimeout(sndDie, 180);
+    if (score > 0 && score >= best) {
+      newBest = true;
+      setTimeout(() => { sndFanfare(); spawnConfetti(); }, 400);
+    }
   }
 }
 
@@ -495,6 +590,78 @@ function checkCollide() {
   return false;
 }
 
+// ── Trophy girl drawing ───────────────────────────────────────────────────────
+function drawTrophyGirl(cx, baseY) {
+  const SK  = '#f5c8a0';
+  const x = cx - 12;
+  const y = baseY;
+
+  // Trophy — big golden cup
+  const tx = cx - 20, ty = y - 58;
+  box('#c8a000', tx + 6,  ty,      28, 4);       // rim
+  box('#f7c948', tx + 4,  ty + 4,  32, 20);      // cup body
+  box('#ffe066', tx + 8,  ty + 6,  24, 14);      // cup highlight
+  box('#c8a000', tx + 10, ty + 24, 20, 4);       // cup base narrow
+  box('#a07800', tx + 14, ty + 28, 12, 6);       // stem
+  box('#c8a000', tx + 8,  ty + 34, 24, 5);       // base plate
+  box('#f7c948', tx + 10, ty + 35, 20, 3);       // base plate highlight
+  // Handles
+  box('#c8a000', tx,      ty + 6,  6, 4);
+  box('#c8a000', tx - 2,  ty + 8,  4, 10);
+  box('#c8a000', tx,      ty + 16, 6, 4);
+  box('#c8a000', tx + 34, ty + 6,  6, 4);
+  box('#c8a000', tx + 38, ty + 8,  4, 10);
+  box('#c8a000', tx + 34, ty + 16, 6, 4);
+  // Star on trophy
+  box('#ffffff', tx + 17, ty + 10, 6, 6);
+  box('#ffffff', tx + 15, ty + 12, 10, 2);
+
+  // Girl body
+  // Hair
+  box('#0d0d0d', x - 1, y - 16, 16, 4);
+  box('#111111', x - 3, y - 12, 20, 14);
+  box('#0a0a0a', x - 4, y - 6,  4, 8);
+  box('#0a0a0a', x + 13,y - 6,  4, 8);
+
+  // Face
+  box(SK,  x + 2, y - 12, 10, 12);
+
+  // Happy eyes — open and sparkly
+  box('#1a0a00', x + 3,  y - 10, 3, 3);
+  box('#1a0a00', x + 8,  y - 10, 3, 3);
+  box('#ffffff', x + 3,  y - 10, 1, 1);
+  box('#ffffff', x + 8,  y - 10, 1, 1);
+  // Sparkle dots
+  box('#ffffff', x + 5,  y - 11, 1, 1);
+  box('#ffffff', x + 10, y - 11, 1, 1);
+
+  // Big happy smile
+  box('#c07060', x + 4, y - 5, 6, 2);
+  box('#c07060', x + 3, y - 6, 1, 1);
+  box('#c07060', x + 10,y - 6, 1, 1);
+
+  // Blush
+  box('#e8a888', x + 1,  y - 6, 3, 2);
+  box('#e8a888', x + 10, y - 6, 3, 2);
+
+  // Dress (red)
+  box('#c0304a', x + 2, y + 5,  10, 12);
+  box('#a02040', x,     y + 7,   4, 8);
+  box('#a02040', x + 10,y + 7,   4, 8);
+
+  // Arms holding trophy up
+  box(SK, x - 2, y - 2,  4, 6);
+  box(SK, x - 4, y - 8,  4, 8);
+  box(SK, x + 12,y - 2,  4, 6);
+  box(SK, x + 14,y - 8,  4, 8);
+
+  // Legs
+  box(SK, x + 3, y + 16, 4, 6);
+  box(SK, x + 7, y + 16, 4, 6);
+  box('#1a1a1a', x + 2, y + 21, 5, 3);
+  box('#1a1a1a', x + 7, y + 21, 5, 3);
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 function render() {
   drawSky();
@@ -506,7 +673,7 @@ function render() {
   });
 
   drawGround();
-  drawChar(BIRD_X, by);
+  drawChar(BIRD_X, by, true, mode === 'dead');
 
   // Score
   if (mode === 'play' || mode === 'dead') {
@@ -533,27 +700,58 @@ function render() {
 
   // ── Game over screen ──
   if (mode === 'dead') {
-    ctx.fillStyle = 'rgba(0,0,0,0.48)';
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
     ctx.fillRect(0, 0, W, H);
 
-    const px = W/2 - 118, py = H/2 - 98;
-    // Panel
-    box('#f7c948', px,     py,     236, 196);
-    box('#e8a000', px,     py,     236,   7);
-    box('#e8a000', px,     py+189, 236,   7);
-    box('#c88000', px,     py+7,     5, 182);
-    box('#c88000', px+231, py+7,     5, 182);
+    const panelW = 260, panelH = newBest ? 310 : 200;
+    const px = W / 2 - panelW / 2, py = H / 2 - panelH / 2 - 10;
 
-    label('GAME  OVER', W/2, py + 50,  22, '#1a1a1a');
+    // Panel background — single warm color
+    ctx.fillStyle = 'rgba(80, 35, 10, 0.92)';
+    ctx.beginPath();
+    roundedRectPath(ctx, px, py, panelW, panelH, 14);
+    ctx.fill();
 
-    // Score rows
-    label('Score :  ' + score, W/2, py + 90,  16, '#333333');
-    label('Best  :  ' + best,  W/2, py + 116, 16, '#333333');
+    // Decorative top/bottom accent lines
+    box('#f7c948', px + 20, py + 12, panelW - 40, 2);
+    box('#f7c948', px + 20, py + panelH - 14, panelW - 40, 2);
 
-    const p2 = 0.65 + 0.35 * Math.sin(tick * 0.09);
+    // "GAME OVER" with thick border
+    label('GAME  OVER', W / 2, py + 44, 26, '#ff6644', '#1a0a00', 8);
+
+    // Divider
+    box('rgba(247,201,72,0.3)', px + 30, py + 56, panelW - 60, 1);
+
+    if (newBest) {
+      // Score is the new best — no separate "Best" row needed
+      label('Score', W / 2, py + 80, 14, '#ffcc88', '#1a0a00', 5);
+      label('' + score, W / 2, py + 104, 28, '#ffdd44', '#1a0a00', 7);
+
+      // "NEW BEST!" banner
+      const pulse = 1 + 0.08 * Math.sin(tick * 0.12);
+      ctx.save();
+      ctx.translate(W / 2, py + 134);
+      ctx.scale(pulse, pulse);
+      label('NEW  BEST!', 0, 0, 20, '#ffdd44', '#1a0a00', 8);
+      ctx.restore();
+
+      // Trophy girl celebration — below the text
+      drawTrophyGirl(W / 2, py + 200);
+    } else {
+      // Normal: show score and best
+      label('Score', W / 2, py + 80, 14, '#ffcc88', '#1a0a00', 5);
+      label('' + score, W / 2, py + 104, 28, '#ffffff', '#1a0a00', 7);
+
+      label('Best', W / 2, py + 130, 14, '#ffcc88', '#1a0a00', 5);
+      label('' + best, W / 2, py + 154, 28, '#ffffff', '#1a0a00', 7);
+    }
+
+    const p2 = 0.55 + 0.45 * Math.sin(tick * 0.09);
     ctx.globalAlpha = p2;
-    label('Space / tap to retry', W/2, py + 162, 13, '#333333');
+    label('Space / tap to retry', W / 2, py + panelH - 24, 12, '#ffcc88');
     ctx.globalAlpha = 1;
+
+    drawConfetti();
   }
 }
 

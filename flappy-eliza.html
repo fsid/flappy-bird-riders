@@ -83,6 +83,7 @@ let mode      = 'title';
 let score     = 0;
 let best      = loadBestScore('fe_hi');
 let tick      = 0;
+let newBest   = false;
 
 let by        = H / 2 - BIRD_H / 2;
 let bvy       = 0;
@@ -91,6 +92,10 @@ let flapTimer = 0;
 let pipes     = [];
 let nextPipe  = 0;
 let groundOff = 0;
+
+// Confetti particles
+let confetti  = [];
+let deadTick  = 0;
 
 const clouds = [
   { x: 50,  y: 75,  w: 72 },
@@ -214,6 +219,65 @@ function sndDie() {
   });
 }
 
+function sndFanfare() {
+  whenAudioReady(() => {
+    const t = audioCtx.currentTime;
+    const notes = [523, 659, 784, 1047];
+    notes.forEach((f, i) => {
+      tone('square',   f, f, 0.18, 0.14, t + i * 0.12);
+      tone('triangle', f, f, 0.12, 0.14, t + i * 0.12);
+    });
+    tone('square',   1047, 1047, 0.22, 0.35, t + 0.48);
+    tone('triangle', 1047, 1047, 0.14, 0.35, t + 0.48);
+    tone('sawtooth', 523,  523,  0.06, 0.35, t + 0.48);
+  });
+}
+
+function spawnConfetti() {
+  confetti = [];
+  const colors = ['#ff4444','#44ff44','#4488ff','#ffdd44','#ff44ff','#44ffff','#ff8800','#ffffff'];
+  for (let i = 0; i < 80; i++) {
+    confetti.push({
+      x: Math.random() * W,
+      y: -10 - Math.random() * 200,
+      vx: (Math.random() - 0.5) * 3,
+      vy: 1.5 + Math.random() * 3,
+      w: 3 + Math.random() * 5,
+      h: 3 + Math.random() * 5,
+      rot: Math.random() * Math.PI * 2,
+      rotV: (Math.random() - 0.5) * 0.2,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      life: 180 + Math.floor(Math.random() * 120)
+    });
+  }
+}
+
+function updateConfetti() {
+  for (let i = confetti.length - 1; i >= 0; i--) {
+    const c = confetti[i];
+    c.x += c.vx;
+    c.y += c.vy;
+    c.vy += 0.03;
+    c.vx *= 0.99;
+    c.rot += c.rotV;
+    c.life--;
+    if (c.life <= 0 || c.y > H + 20) confetti.splice(i, 1);
+  }
+}
+
+function drawConfetti() {
+  confetti.forEach(c => {
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.rot);
+    ctx.globalAlpha = Math.min(1, c.life / 30);
+    ctx.fillStyle = c.color;
+    ctx.fillRect(-c.w / 2, -c.h / 2, c.w, c.h);
+    ctx.restore();
+  });
+  ctx.globalAlpha = 1;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function box(c, x, y, w, h) {
   activeCtx.fillStyle = c;
@@ -237,10 +301,10 @@ function roundedRectPath(context, x, y, w, h, r) {
   context.arcTo(x, y, x + w, y, rr);
   context.closePath();
 }
-function label(text, x, y, size, fill, stroke) {
+function label(text, x, y, size, fill, stroke, lineW) {
   activeCtx.font = `bold ${size}px "Courier New",monospace`;
   activeCtx.textAlign = 'center';
-  if (stroke) { activeCtx.strokeStyle = stroke; activeCtx.lineWidth = 4; activeCtx.strokeText(text, x, y); }
+  if (stroke) { activeCtx.strokeStyle = stroke; activeCtx.lineWidth = lineW || 4; activeCtx.lineJoin = 'round'; activeCtx.strokeText(text, x, y); }
   activeCtx.fillStyle = fill;
   activeCtx.fillText(text, x, y);
 }
@@ -257,7 +321,7 @@ function label(text, x, y, size, fill, stroke) {
 //   5. Bent back leg
 //   6. Wing  (drawn last — always in front of leg)
 //
-function drawChar(bx, g, showLabel = true) {
+function drawChar(bx, g, showLabel = true, isDead = false) {
 
   const HC  = '#ee66aa';   // hijab pink
   const HCD = '#cc3388';   // hijab shadow
@@ -277,9 +341,17 @@ function drawChar(bx, g, showLabel = true) {
 
   // ── 3. Bird surface detail (right half — fully clear of Eliza) ───────────
   box('#fffbd4', bx+16, g+5,  14, 14);
-  box('#ffffff', bx+21, g+3,   9,  9);
-  box('#111111', bx+23, g+5,   6,  6);
-  box('#ffffff', bx+25, g+5,   2,  2);
+  if (isDead) {
+    // Bird dazed eyes — half-closed, swirly
+    box('#ffffff', bx+21, g+3, 9, 9);
+    box('#111111', bx+22, g+6, 7, 4);
+    box('#ffffff', bx+21, g+3, 9, 3);
+    box('#444444', bx+24, g+7, 3, 2);
+  } else {
+    box('#ffffff', bx+21, g+3,   9,  9);
+    box('#111111', bx+23, g+5,   6,  6);
+    box('#ffffff', bx+25, g+5,   2,  2);
+  }
   box('#f08020', bx+BIRD_W, g+7,  10,  5);
   box('#c06010', bx+BIRD_W, g+12, 10,  3);
 
@@ -297,18 +369,31 @@ function drawChar(bx, g, showLabel = true) {
   // Face window (drawn over hijab sides — white skin)
   box(SK,   bx+1,  g-23, 12, 14);       // face: bx+1→bx+13, g-23→g-9
 
-  // Brows (brown — not black)
-  box('#664422', bx+3,  g-22,  4,  2);
-  box('#664422', bx+9,  g-22,  4,  2);
-
-  // Eyes (blue)
-  box('#1a3a8a', bx+3,  g-20,  3,  3);
-  box('#1a3a8a', bx+9,  g-20,  3,  3);
-  box('#ffffff', bx+3,  g-20,  1,  1);
-  box('#ffffff', bx+9,  g-20,  1,  1);
-
-  // Mouth
-  box('#cc7766', bx+4,  g-14,  5,  2);
+  if (isDead) {
+    // Brows raised/worried
+    box('#664422', bx+3,  g-23,  4,  2);
+    box('#664422', bx+9,  g-23,  4,  2);
+    // Half-lidded worried eyes — squinting but visible
+    box('#1a3a8a', bx+3,  g-19,  3,  3);
+    box('#1a3a8a', bx+9,  g-19,  3,  3);
+    box(SK,        bx+3,  g-19,  3,  1);
+    box('#ffffff', bx+3,  g-18,  1,  1);
+    box('#ffffff', bx+9,  g-18,  1,  1);
+    // "Oh" mouth — round open
+    box('#cc4444', bx+5,  g-15,  4,  4);
+    box(SK,        bx+6,  g-14,  2,  2);
+  } else {
+    // Brows (brown — not black)
+    box('#664422', bx+3,  g-22,  4,  2);
+    box('#664422', bx+9,  g-22,  4,  2);
+    // Eyes (blue)
+    box('#1a3a8a', bx+3,  g-20,  3,  3);
+    box('#1a3a8a', bx+9,  g-20,  3,  3);
+    box('#ffffff', bx+3,  g-20,  1,  1);
+    box('#ffffff', bx+9,  g-20,  1,  1);
+    // Mouth
+    box('#cc7766', bx+4,  g-14,  5,  2);
+  }
 
   // Dress — purple, compact torso (hijab already covers neck so no neck needed)
   box('#8855bb', bx+1,  g-1, 12,  7);   // torso
@@ -409,6 +494,7 @@ function tap() {
 function restart() {
   by = H/2 - BIRD_H/2; bvy = 0; flapTimer = 0;
   pipes = []; score = 0; tick = 0; groundOff = 0;
+  newBest = false; confetti = []; deadTick = 0;
   mode = 'title';
 }
 
@@ -420,6 +506,8 @@ function update() {
   }
   if (mode === 'dead') {
     if (by + BIRD_H >= GROUND) { by = GROUND - BIRD_H; bvy = 0; }
+    deadTick++;
+    updateConfetti();
     return;
   }
   if (mode !== 'play') return;
@@ -443,7 +531,13 @@ function update() {
   });
   pipes = pipes.filter(p => p.x + OBS_W > -20);
 
-  if (checkCollide()) { mode = 'dead'; sndHit(); setTimeout(sndDie, 180); }
+  if (checkCollide()) {
+    mode = 'dead'; deadTick = 0; sndHit(); setTimeout(sndDie, 180);
+    if (score > 0 && score >= best) {
+      newBest = true;
+      setTimeout(() => { sndFanfare(); spawnConfetti(); }, 400);
+    }
+  }
 }
 
 function checkCollide() {
@@ -460,6 +554,84 @@ function checkCollide() {
   return false;
 }
 
+// ── Trophy girl drawing ───────────────────────────────────────────────────────
+function drawTrophyGirl(cx, baseY) {
+  const HC  = '#ee66aa';
+  const HCD = '#cc3388';
+  const HCL = '#ff99cc';
+  const SK  = '#fde8c8';
+  const x = cx - 12;
+  const y = baseY;
+
+  // Trophy — big golden cup
+  const tx = cx - 20, ty = y - 58;
+  box('#c8a000', tx + 6,  ty,      28, 4);       // rim
+  box('#f7c948', tx + 4,  ty + 4,  32, 20);      // cup body
+  box('#ffe066', tx + 8,  ty + 6,  24, 14);      // cup highlight
+  box('#c8a000', tx + 10, ty + 24, 20, 4);       // cup base narrow
+  box('#a07800', tx + 14, ty + 28, 12, 6);       // stem
+  box('#c8a000', tx + 8,  ty + 34, 24, 5);       // base plate
+  box('#f7c948', tx + 10, ty + 35, 20, 3);       // base plate highlight
+  // Handles
+  box('#c8a000', tx,      ty + 6,  6, 4);
+  box('#c8a000', tx - 2,  ty + 8,  4, 10);
+  box('#c8a000', tx,      ty + 16, 6, 4);
+  box('#c8a000', tx + 34, ty + 6,  6, 4);
+  box('#c8a000', tx + 38, ty + 8,  4, 10);
+  box('#c8a000', tx + 34, ty + 16, 6, 4);
+  // Star on trophy
+  box('#ffffff', tx + 17, ty + 10, 6, 6);
+  box('#ffffff', tx + 15, ty + 12, 10, 2);
+
+  // Girl body
+  // Hijab
+  box(HC,  x - 1, y - 16, 16, 4);
+  box(HCL, x,     y - 15, 14, 2);
+  box(HCD, x - 3, y - 12,  6, 12);
+  box(HC,  x - 2, y - 12,  4, 12);
+  box(HCD, x + 12,y - 12,  5, 12);
+  box(HC,  x - 1, y + 0,  16, 6);
+  box(HCL, x,     y + 0,  14, 2);
+
+  // Face
+  box(SK,  x + 2, y - 12, 10, 12);
+
+  // Happy eyes — open and sparkly
+  box('#1a3a8a', x + 3,  y - 10, 3, 3);
+  box('#1a3a8a', x + 8,  y - 10, 3, 3);
+  box('#ffffff', x + 3,  y - 10, 1, 1);
+  box('#ffffff', x + 8,  y - 10, 1, 1);
+  // Sparkle dots
+  box('#ffffff', x + 5,  y - 11, 1, 1);
+  box('#ffffff', x + 10, y - 11, 1, 1);
+
+  // Big happy smile
+  box('#cc5555', x + 4, y - 5, 6, 2);
+  box('#cc5555', x + 3, y - 6, 1, 1);
+  box('#cc5555', x + 10,y - 6, 1, 1);
+
+  // Blush
+  box('#ffaaaa', x + 1,  y - 6, 3, 2);
+  box('#ffaaaa', x + 10, y - 6, 3, 2);
+
+  // Dress
+  box('#8855bb', x + 2, y + 5,  10, 12);
+  box('#7744aa', x,     y + 7,   4, 8);
+  box('#7744aa', x + 10,y + 7,   4, 8);
+
+  // Arms holding trophy up
+  box(SK, x - 2, y - 2,  4, 6);
+  box(SK, x - 4, y - 8,  4, 8);
+  box(SK, x + 12,y - 2,  4, 6);
+  box(SK, x + 14,y - 8,  4, 8);
+
+  // Legs
+  box(SK, x + 3, y + 16, 4, 6);
+  box(SK, x + 7, y + 16, 4, 6);
+  box('#1a1a1a', x + 2, y + 21, 5, 3);
+  box('#1a1a1a', x + 7, y + 21, 5, 3);
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 function render() {
   drawSky();
@@ -471,7 +643,7 @@ function render() {
   });
 
   drawGround();
-  drawChar(BIRD_X, by);
+  drawChar(BIRD_X, by, true, mode === 'dead');
 
   if (mode === 'play' || mode === 'dead')
     label(score, W/2, 52, 32, '#ffffff', '#2c2c2c');
@@ -491,21 +663,58 @@ function render() {
   }
 
   if (mode === 'dead') {
-    ctx.fillStyle = 'rgba(0,0,0,0.48)';
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
     ctx.fillRect(0, 0, W, H);
-    const px = W/2 - 118, py = H/2 - 98;
-    box('#cc99ff', px,     py,     236, 196);
-    box('#9955dd', px,     py,     236,   7);
-    box('#9955dd', px,     py+189, 236,   7);
-    box('#7733bb', px,     py+7,     5, 182);
-    box('#7733bb', px+231, py+7,     5, 182);
-    label('GAME  OVER', W/2, py + 50,  22, '#1a1a1a');
-    label('Score :  ' + score, W/2, py + 90,  16, '#333333');
-    label('Best  :  ' + best,  W/2, py + 116, 16, '#333333');
-    const p2 = 0.65 + 0.35 * Math.sin(tick * 0.09);
+
+    const panelW = 260, panelH = newBest ? 310 : 200;
+    const px = W / 2 - panelW / 2, py = H / 2 - panelH / 2 - 10;
+
+    // Panel background — single soft color
+    ctx.fillStyle = 'rgba(60, 30, 90, 0.92)';
+    ctx.beginPath();
+    roundedRectPath(ctx, px, py, panelW, panelH, 14);
+    ctx.fill();
+
+    // Decorative top/bottom accent lines
+    box('#aa77ff', px + 20, py + 12, panelW - 40, 2);
+    box('#aa77ff', px + 20, py + panelH - 14, panelW - 40, 2);
+
+    // "GAME OVER" with thick border
+    label('GAME  OVER', W / 2, py + 44, 26, '#ff6688', '#1a0a1a', 8);
+
+    // Divider
+    box('rgba(170,119,255,0.3)', px + 30, py + 56, panelW - 60, 1);
+
+    if (newBest) {
+      // Score is the new best — no separate "Best" row needed
+      label('Score', W / 2, py + 80, 14, '#ccaaff', '#1a0a2a', 5);
+      label('' + score, W / 2, py + 104, 28, '#ffdd44', '#1a0a1a', 7);
+
+      // "NEW BEST!" banner
+      const pulse = 1 + 0.08 * Math.sin(tick * 0.12);
+      ctx.save();
+      ctx.translate(W / 2, py + 134);
+      ctx.scale(pulse, pulse);
+      label('NEW  BEST!', 0, 0, 20, '#ffdd44', '#1a0a1a', 8);
+      ctx.restore();
+
+      // Trophy girl celebration — below the text
+      drawTrophyGirl(W / 2, py + 200);
+    } else {
+      // Normal: show score and best
+      label('Score', W / 2, py + 80, 14, '#ccaaff', '#1a0a2a', 5);
+      label('' + score, W / 2, py + 104, 28, '#ffffff', '#1a0a1a', 7);
+
+      label('Best', W / 2, py + 130, 14, '#ccaaff', '#1a0a2a', 5);
+      label('' + best, W / 2, py + 154, 28, '#ffffff', '#1a0a1a', 7);
+    }
+
+    const p2 = 0.55 + 0.45 * Math.sin(tick * 0.09);
     ctx.globalAlpha = p2;
-    label('Space / tap to retry', W/2, py + 162, 13, '#333333');
+    label('Space / tap to retry', W / 2, py + panelH - 24, 12, '#aa88dd');
     ctx.globalAlpha = 1;
+
+    drawConfetti();
   }
 }
 
