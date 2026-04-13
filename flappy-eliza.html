@@ -110,24 +110,51 @@ const EQUATIONS = [
 let audioCtx = null;
 let muted    = false;
 let audioReadyPromise = null;
-let audioReady = false;
+let audioEnabled = false;
+let hasTriedCreateAudio = false;
+
+function createAudioContext() {
+  if (audioCtx) return audioCtx;
+  if (!window.AudioContext && !window.webkitAudioContext) return null;
+  const ctor = window.AudioContext || window.webkitAudioContext;
+  try {
+    audioCtx = new ctor({ latencyHint: 'interactive' });
+  } catch {
+    audioCtx = new ctor();
+  }
+  return audioCtx;
+}
 
 function ensureAudio() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+  if (!audioCtx) {
+    if (hasTriedCreateAudio) return Promise.resolve(false);
+    hasTriedCreateAudio = true;
+    audioCtx = createAudioContext();
+    if (!audioCtx) return Promise.resolve(false);
+  }
   if (audioCtx.state === 'running') {
-    audioReady = true;
-    return Promise.resolve();
+    audioEnabled = true;
+    return Promise.resolve(true);
   }
-  if (audioCtx.state === 'suspended' && !audioReadyPromise) {
+
+  if (!audioReadyPromise) {
     audioReadyPromise = audioCtx.resume()
-      .then(() => { audioReady = audioCtx.state === 'running'; })
-      .catch(() => {})
-      .finally(() => { audioReadyPromise = null; });
+      .then(() => {
+        audioEnabled = audioCtx.state === 'running';
+        return audioEnabled;
+      })
+      .catch(() => {
+        audioEnabled = false;
+        return false;
+      })
+      .finally(() => {
+        audioReadyPromise = null;
+      });
   }
-  return audioReadyPromise || Promise.resolve();
+  return audioReadyPromise;
 }
 function tone(type, freqStart, freqEnd, gainAmt, dur, when) {
-  if (muted || !audioCtx) return;
+  if (muted || !audioEnabled || !audioCtx) return;
   const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
   osc.connect(gain); gain.connect(audioCtx.destination);
   osc.type = type;
@@ -140,17 +167,19 @@ function tone(type, freqStart, freqEnd, gainAmt, dur, when) {
   gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
   osc.start(t); osc.stop(t + dur + 0.02);
 }
-function sndFlap()  { ensureAudio().then(() => tone('square',   370, 540, 0.16, 0.09)); }
+function sndFlap()  { ensureAudio().then((ready) => { if (!ready) return; tone('square',   370, 540, 0.16, 0.09); }); }
 function sndScore() {
-  ensureAudio().then(() => {
+  ensureAudio().then((ready) => {
+    if (!ready) return;
     const t = audioCtx.currentTime;
     tone('square', 523, 523, 0.20, 0.08, t);
     tone('square', 784, 784, 0.20, 0.11, t + 0.08);
   });
 }
-function sndHit() { ensureAudio().then(() => tone('sawtooth', 240, 55, 0.40, 0.22)); }
+function sndHit() { ensureAudio().then((ready) => { if (!ready) return; tone('sawtooth', 240, 55, 0.40, 0.22); }); }
 function sndDie() {
-  ensureAudio().then(() => {
+  ensureAudio().then((ready) => {
+    if (!ready) return;
     const t = audioCtx.currentTime;
     [[392,0.10],[330,0.10],[220,0.18]].forEach(([f,d],i) =>
       tone('square', f, f*0.80, 0.22, d, t + i*0.13));
