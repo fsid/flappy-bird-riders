@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flappy Eliza</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #111827;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}
+canvas {
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  border: 3px solid #374151;
+  box-shadow: 0 0 48px rgba(160, 120, 220, 0.28);
+  cursor: pointer;
+  touch-action: none;
+}
+</style>
+</head>
+<body>
+<canvas id="c" width="360" height="600"></canvas>
+<script>
+// ── Setup ─────────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+let activeCtx = ctx;
+
+const W = 360, H = 600;
+const GROUND   = H - 62;
+const GRAVITY  = 0.46;
+const FLAP_VEL = -8.4;
+const OBS_W    = 52;    // obstacle (equation stack) width
+const OBS_GAP  = 144;
+const OBS_SPD  = 2.4;
+const OBS_INT  = 1800;
+const BIRD_X   = 70;
+const BIRD_W   = 34;
+const BIRD_H   = 24;
+
+function loadBestScore(key) {
+  try {
+    const raw = window.localStorage?.getItem(key);
+    const num = Number(raw);
+    return Number.isFinite(num) ? num : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveBestScore(key, value) {
+  try {
+    window.localStorage?.setItem(key, String(value));
+  } catch {
+    // iOS file previews and private sessions can block storage.
+  }
+}
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let mode      = 'title';
+let score     = 0;
+let best      = loadBestScore('fe_hi');
+let tick      = 0;
+
+let by        = H / 2 - BIRD_H / 2;
+let bvy       = 0;
+let flapTimer = 0;
+
+let pipes     = [];
+let nextPipe  = 0;
+let groundOff = 0;
+
+const clouds = [
+  { x: 50,  y: 75,  w: 72 },
+  { x: 240, y: 52,  w: 58 },
+  { x: 320, y: 100, w: 50 },
+];
+
+// Math equations shown on obstacle panels
+const EQUATIONS = [
+  'x²+y²=r²', 'dy/dx',   'f(x)=0',  'ax²+bx',  '√(x+1)',
+  'eⁱᵖ = -1', 'sin²(θ)', 'lim→∞',   'Σ n²',    "f'(x)",
+  'a²+b²=c²', 'P(A|B)',  '2πr²',    'E = mc²', 'F = ma',
+  'log₂(n)',  'nCr',     'v = u+at', 'PV=nRT',  'Δx → 0'
+];
+
+// ── Audio (identical to Flappy Tahira) ────────────────────────────────────────
+let audioCtx = null;
+let muted    = false;
+
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+function tone(type, freqStart, freqEnd, gainAmt, dur, when) {
+  if (muted || !audioCtx) return;
+  const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.type = type;
+  const t = when ?? audioCtx.currentTime;
+  osc.frequency.setValueAtTime(freqStart, t);
+  if (freqEnd && freqEnd !== freqStart)
+    osc.frequency.exponentialRampToValueAtTime(freqEnd, t + dur);
+  gain.gain.setValueAtTime(gainAmt, t);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.start(t); osc.stop(t + dur + 0.02);
+}
+function sndFlap()  { ensureAudio(); tone('square',   370, 540, 0.16, 0.09); }
+function sndScore() {
+  ensureAudio();
+  const t = audioCtx.currentTime;
+  tone('square', 523, 523, 0.20, 0.08, t);
+  tone('square', 784, 784, 0.20, 0.11, t + 0.08);
+}
+function sndHit() { ensureAudio(); tone('sawtooth', 240, 55, 0.40, 0.22); }
+function sndDie() {
+  ensureAudio();
+  const t = audioCtx.currentTime;
+  [[392,0.10],[330,0.10],[220,0.18]].forEach(([f,d],i) =>
+    tone('square', f, f*0.80, 0.22, d, t + i*0.13));
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function box(c, x, y, w, h) {
+  activeCtx.fillStyle = c;
+  activeCtx.fillRect(x|0, y|0, w|0, h|0);
+}
+function bright(hex, n) {
+  const v = parseInt(hex.slice(1), 16);
+  const cl = x => Math.min(255, Math.max(0, x));
+  return `rgb(${cl((v>>16)+n)},${cl(((v>>8)&255)+n)},${cl((v&255)+n)})`;
+}
+function roundedRectPath(context, x, y, w, h, r) {
+  if (typeof context.roundRect === 'function') {
+    context.roundRect(x, y, w, h, r);
+    return;
+  }
+  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+  context.moveTo(x + rr, y);
+  context.arcTo(x + w, y, x + w, y + h, rr);
+  context.arcTo(x + w, y + h, x, y + h, rr);
+  context.arcTo(x, y + h, x, y, rr);
+  context.arcTo(x, y, x + w, y, rr);
+  context.closePath();
+}
+function label(text, x, y, size, fill, stroke) {
+  activeCtx.font = `bold ${size}px "Courier New",monospace`;
+  activeCtx.textAlign = 'center';
+  if (stroke) { activeCtx.strokeStyle = stroke; activeCtx.lineWidth = 4; activeCtx.strokeText(text, x, y); }
+  activeCtx.fillStyle = fill;
+  activeCtx.fillText(text, x, y);
+}
+
+// ── Draw character (bird + Eliza) ─────────────────────────────────────────────
+// Eliza: white girl, teal hijab, purple dress, blue eyes.
+// Girl sits over the LEFT half of bird (bx+1..bx+15) — eye (bx+21) stays clear.
+//
+// Layer order (back → front):
+//   1. Hijab back drape + tail      (behind bird body)
+//   2. Bird body
+//   3. Belly / eye / beak
+//   4. Eliza — hijab frames face, dress, arm
+//   5. Bent back leg
+//   6. Wing  (drawn last — always in front of leg)
+//
+function drawChar(bx, g, showLabel = true) {
+
+  const HC  = '#ee66aa';   // hijab pink
+  const HCD = '#cc3388';   // hijab shadow
+  const HCL = '#ff99cc';   // hijab highlight
+  const SK  = '#fde8c8';   // skin (lighter, white girl)
+
+  // ── 1. Behind the bird ───────────────────────────────────────────────────
+  box(HC,  bx-7, g-18,  9, 26);   // hijab back drape flowing behind bird
+
+  box('#c8a000', bx-9, g+8,  11,  8);   // tail base
+  box('#e0b200', bx-7, g+13,  8,  5);   // tail tip
+
+  // ── 2. Bird body ─────────────────────────────────────────────────────────
+  box('#f7c948', bx,   g,        BIRD_W,   BIRD_H);
+  box('#f7c948', bx+3, g-2,      BIRD_W-6,  4);
+  box('#f7c948', bx+3, g+BIRD_H, BIRD_W-6,  3);
+
+  // ── 3. Bird surface detail (right half — fully clear of Eliza) ───────────
+  box('#fffbd4', bx+16, g+5,  14, 14);
+  box('#ffffff', bx+21, g+3,   9,  9);
+  box('#111111', bx+23, g+5,   6,  6);
+  box('#ffffff', bx+25, g+5,   2,  2);
+  box('#f08020', bx+BIRD_W, g+7,  10,  5);
+  box('#c06010', bx+BIRD_W, g+12, 10,  3);
+
+  // ── 4. Eliza ─────────────────────────────────────────────────────────────
+
+  // Hijab — drawn first; face is painted on top to create the framed-face look
+  box(HC,  bx-2, g-27, 16,  4);         // top cap
+  box(HCL, bx-1, g-26, 14,  2);         // highlight stripe on top
+  box(HCD, bx-4, g-23,  6, 14);         // left side panel (frames face left)
+  box(HC,  bx-3, g-23,  4, 14);         // left panel (slightly lighter)
+  box(HCD, bx+13,g-23,  5, 14);         // right side panel (frames face right, ends bx+18)
+  box(HC,  bx-2, g-9,  16,  8);         // chin + neck drape (covers neck area)
+  box(HCL, bx-1, g-9,  14,  2);         // chin highlight
+
+  // Face window (drawn over hijab sides — white skin)
+  box(SK,   bx+1,  g-23, 12, 14);       // face: bx+1→bx+13, g-23→g-9
+
+  // Brows (brown — not black)
+  box('#664422', bx+3,  g-22,  4,  2);
+  box('#664422', bx+9,  g-22,  4,  2);
+
+  // Eyes (blue)
+  box('#1a3a8a', bx+3,  g-20,  3,  3);
+  box('#1a3a8a', bx+9,  g-20,  3,  3);
+  box('#ffffff', bx+3,  g-20,  1,  1);
+  box('#ffffff', bx+9,  g-20,  1,  1);
+
+  // Mouth
+  box('#cc7766', bx+4,  g-14,  5,  2);
+
+  // Dress — purple, compact torso (hijab already covers neck so no neck needed)
+  box('#8855bb', bx+1,  g-1, 12,  7);   // torso
+  box('#6633aa', bx-1,  g+0,  4,  6);   // back sleeve cap
+
+  // Bent back arm (skin)
+  box(SK,  bx-1,  g+4,  3,  5);         // upper arm down
+  box(SK,  bx-1,  g+8,  8,  3);         // forearm forward
+  box(SK,  bx+6,  g+6,  3,  4);         // hand gripping
+
+  // ── 5. Bent back leg ─────────────────────────────────────────────────────
+  box('#2244aa', bx+1,  g+5,  6,  4);   // thigh going back
+  box('#2244aa', bx-1,  g+9,  4,  5);   // shin down
+  box('#1a1a1a', bx-3,  g+13, 7,  3);   // shoe pointing back
+
+  // ── 6. Wing — drawn last, in front of leg ────────────────────────────────
+  const wingY = flapTimer > 0 ? g + 6 : g + 14;
+  box('#d4a000', bx+1,  wingY,     16, 9);
+  box('#c09000', bx+3,  wingY + 2, 10, 5);
+
+  if (showLabel) label('Eliza', bx + 8, g - 34, 10, '#ffffff', '#2c2c2c');
+}
+
+// ── Draw math equation obstacles ──────────────────────────────────────────────
+const SPINE = 16;
+
+// Bright background colours for equation panels (one per panel, cycles)
+const EQ_COLORS = [
+  '#e74c3c','#e67e22','#f1c40f','#2ecc71',
+  '#1abc9c','#3498db','#9b59b6','#e91e63',
+  '#ff5722','#00bcd4','#8bc34a','#ff9800',
+  '#673ab7','#009688','#f06292','#29b6f6'
+];
+
+function drawEqPanel(bx, y, idx) {
+  const eq  = EQUATIONS[Math.abs(idx) % EQUATIONS.length];
+  const bg  = EQ_COLORS[Math.abs(idx) % EQ_COLORS.length];
+  const bgD = bright(bg, -40);   // darker shade for inner area
+  box(bg,  bx,   y,         OBS_W,   SPINE-1);   // colourful background
+  box(bgD, bx+2, y+1,       OBS_W-4, SPINE-3);   // darker inner panel
+  box('#00000033'[0] === '#' ? '#00000044' : '#00000044', bx, y+SPINE-1, OBS_W, 1);
+  activeCtx.font = 'bold 8px "Courier New",monospace';
+  activeCtx.textAlign = 'center';
+  activeCtx.fillStyle = '#ffffff';                // white text on colour
+  activeCtx.fillText(eq, (bx + OBS_W/2)|0, (y + SPINE - 4)|0);
+}
+
+function drawTopEqs(bx, height) {
+  for (let y = 0, i = 0; y < height - SPINE*2; y += SPINE, i++)
+    drawEqPanel(bx, y, i);
+  // Endcap — gold frame
+  box('#5d4037', bx-5, height-SPINE*2, OBS_W+10, SPINE*2);
+  box('#795548', bx-5, height-SPINE*2, OBS_W+10,  5);
+  box('#3e2723', bx-5, height-4,       OBS_W+10,  4);
+}
+
+function drawBotEqs(bx, startY) {
+  // Endcap
+  box('#5d4037', bx-5, startY,            OBS_W+10, SPINE*2);
+  box('#795548', bx-5, startY,            OBS_W+10,  5);
+  box('#3e2723', bx-5, startY+SPINE*2-4,  OBS_W+10,  4);
+  for (let y = startY+SPINE*2, i = 0; y < GROUND; y += SPINE, i++)
+    drawEqPanel(bx, y, i + 8);
+}
+
+// ── Draw scenery (same as Flappy Tahira) ──────────────────────────────────────
+function drawSky() {
+  box('#70c5ce', 0,  0, W, H);
+  box('#a8dde6', 0,  0, W, 90);
+  box('#84ccd8', 0, 70, W, 35);
+}
+function drawCloud(x, y, w) {
+  box('#f4faff', x + (w*0.2)|0, y,    (w*0.6)|0, 11);
+  box('#f4faff', x,             y+8,  w,         15);
+  box('#ddeefa', x+4,           y+10, w-8,       11);
+}
+function drawGround() {
+  box('#5b8a3b', 0, GROUND,     W,  8);
+  box('#4a7030', 0, GROUND+6,   W,  5);
+  box('#c8a555', 0, GROUND+11,  W, H-GROUND-11);
+  const off = ((-groundOff % 28) + 28) % 28;
+  for (let gx = off - 28; gx < W; gx += 28)
+    box('#b89440', gx|0, GROUND+17, 14, 4);
+}
+
+// ── Physics / logic ───────────────────────────────────────────────────────────
+function tap() {
+  ensureAudio();
+  if (mode === 'title') {
+    mode = 'play'; bvy = FLAP_VEL; flapTimer = 10;
+    nextPipe = Date.now() + 600; sndFlap();
+  } else if (mode === 'play') {
+    bvy = FLAP_VEL; flapTimer = 10; sndFlap();
+  } else if (mode === 'dead') {
+    restart();
+  }
+}
+
+function restart() {
+  by = H/2 - BIRD_H/2; bvy = 0; flapTimer = 0;
+  pipes = []; score = 0; tick = 0; groundOff = 0;
+  mode = 'title';
+}
+
+function update() {
+  tick++;
+  if (mode === 'play' || mode === 'dead') {
+    bvy += GRAVITY; by += bvy;
+    if (flapTimer > 0) flapTimer--;
+  }
+  if (mode === 'dead') {
+    if (by + BIRD_H >= GROUND) { by = GROUND - BIRD_H; bvy = 0; }
+    return;
+  }
+  if (mode !== 'play') return;
+
+  groundOff += OBS_SPD;
+  clouds.forEach(c => { c.x -= 0.35; if (c.x + c.w < 0) c.x = W + 10; });
+
+  if (Date.now() > nextPipe) {
+    const gapY = 90 + Math.random() * (GROUND - OBS_GAP - 120);
+    pipes.push({ x: W + 10, gapY, passed: false });
+    nextPipe = Date.now() + OBS_INT;
+  }
+
+  pipes.forEach(p => {
+    p.x -= OBS_SPD;
+    if (!p.passed && p.x + OBS_W < BIRD_X) {
+      p.passed = true; score++;
+      sndScore();
+      if (score > best) { best = score; saveBestScore('fe_hi', best); }
+    }
+  });
+  pipes = pipes.filter(p => p.x + OBS_W > -20);
+
+  if (checkCollide()) { mode = 'dead'; sndHit(); setTimeout(sndDie, 180); }
+}
+
+function checkCollide() {
+  if (by + BIRD_H >= GROUND) return true;
+  if (by - 20 <= 0)          return true;
+  const left = BIRD_X + 4, right = BIRD_X + BIRD_W - 4;
+  const top  = by - 12,    bot   = by + BIRD_H - 2;
+  for (const p of pipes) {
+    if (right > p.x + 3 && left < p.x + OBS_W - 3) {
+      if (top < p.gapY)             return true;
+      if (bot > p.gapY + OBS_GAP)  return true;
+    }
+  }
+  return false;
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function render() {
+  drawSky();
+  clouds.forEach(c => drawCloud(c.x, c.y, c.w));
+
+  pipes.forEach(p => {
+    drawTopEqs(p.x, p.gapY);
+    drawBotEqs(p.x, p.gapY + OBS_GAP);
+  });
+
+  drawGround();
+  drawChar(BIRD_X, by);
+
+  if (mode === 'play' || mode === 'dead')
+    label(score, W/2, 52, 32, '#ffffff', '#2c2c2c');
+
+  drawMuteBtn();
+
+  if (mode === 'title') {
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(0, 0, W, H);
+    label('FLAPPY', W/2, H/2 - 58, 40, '#ffffff', '#1a1a1a');
+    label('ELIZA',  W/2, H/2 -  8, 40, '#aa77ff', '#1a1a1a');
+    const p = 0.65 + 0.35 * Math.sin(tick * 0.065);
+    ctx.globalAlpha = p;
+    label('SPACE  /  tap  to  play', W/2, H/2 + 42, 14, '#ffffff');
+    ctx.globalAlpha = 1;
+    if (best > 0) label('Best: ' + best, W/2, H/2 + 70, 13, '#aa77ff');
+  }
+
+  if (mode === 'dead') {
+    ctx.fillStyle = 'rgba(0,0,0,0.48)';
+    ctx.fillRect(0, 0, W, H);
+    const px = W/2 - 118, py = H/2 - 98;
+    box('#cc99ff', px,     py,     236, 196);
+    box('#9955dd', px,     py,     236,   7);
+    box('#9955dd', px,     py+189, 236,   7);
+    box('#7733bb', px,     py+7,     5, 182);
+    box('#7733bb', px+231, py+7,     5, 182);
+    label('GAME  OVER', W/2, py + 50,  22, '#1a1a1a');
+    label('Score :  ' + score, W/2, py + 90,  16, '#333333');
+    label('Best  :  ' + best,  W/2, py + 116, 16, '#333333');
+    const p2 = 0.65 + 0.35 * Math.sin(tick * 0.09);
+    ctx.globalAlpha = p2;
+    label('Space / tap to retry', W/2, py + 162, 13, '#333333');
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ── Mute button ───────────────────────────────────────────────────────────────
+const MUTE_X = W - 38, MUTE_Y = 8, MUTE_S = 28;
+
+function drawMuteBtn() {
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath();
+  roundedRectPath(ctx, MUTE_X, MUTE_Y, MUTE_S, MUTE_S, 6);
+  ctx.fill();
+  const ix = MUTE_X + 7, iy = MUTE_Y + 8;
+  box('#ffffff', ix,   iy+2, 4, 8);
+  box('#ffffff', ix+4, iy,   4, 12);
+  if (!muted) {
+    box('#ffffff', ix+10, iy+2, 2, 2);
+    box('#ffffff', ix+10, iy+8, 2, 2);
+    box('#ffffff', ix+13, iy,   2, 4);
+    box('#ffffff', ix+13, iy+8, 2, 4);
+  } else {
+    box('#ff6666', ix+10, iy+2, 8, 2);
+    box('#ff6666', ix+10, iy+8, 8, 2);
+    box('#ff6666', ix+14, iy+4, 2, 4);
+    box('#ff6666', ix+10, iy+4, 2, 4);
+  }
+}
+function isMuteBtn(mx, my) {
+  return mx >= MUTE_X && mx <= MUTE_X + MUTE_S &&
+         my >= MUTE_Y && my <= MUTE_Y + MUTE_S;
+}
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key === 'm' || e.key === 'M') { muted = !muted; return; }
+  if (e.key === ' ' || e.key === 'ArrowUp') { e.preventDefault(); tap(); }
+});
+canvas.addEventListener('click', e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) * (W / rect.width);
+  const my = (e.clientY - rect.top)  * (H / rect.height);
+  if (isMuteBtn(mx, my)) { muted = !muted; return; }
+  tap();
+});
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect(), touch = e.touches[0];
+  const mx = (touch.clientX - rect.left) * (W / rect.width);
+  const my = (touch.clientY - rect.top)  * (H / rect.height);
+  if (isMuteBtn(mx, my)) { muted = !muted; return; }
+  tap();
+}, { passive: false });
+
+// ── PWA icon + manifest ───────────────────────────────────────────────────────
+function generateIcon(size) {
+  const ic = document.createElement('canvas');
+  ic.width = ic.height = size;
+  const ictx = ic.getContext('2d');
+  ictx.imageSmoothingEnabled = false;
+  const grad = ictx.createLinearGradient(0, 0, 0, size);
+  grad.addColorStop(0,   '#a8dde6');
+  grad.addColorStop(0.7, '#70c5ce');
+  grad.addColorStop(1,   '#5bbbc8');
+  ictx.fillStyle = grad;
+  ictx.fillRect(0, 0, size, size);
+  const SCALE = Math.max(1, Math.round(size / 64));
+  const bx = Math.round(size / 2 / SCALE - 17.5);
+  const g  = Math.round(size / 2 / SCALE +  1.5);
+  activeCtx = ictx;
+  ictx.save();
+  ictx.scale(SCALE, SCALE);
+  drawChar(bx, g, false);
+  ictx.restore();
+  activeCtx = ctx;
+  return ic.toDataURL('image/png');
+}
+
+function setupPWA() {
+  const icon512 = generateIcon(512);
+  const icon192 = generateIcon(192);
+  const icon64  = generateIcon(64);
+  const manifest = {
+    name: 'Flappy Eliza', short_name: 'Flappy Eliza',
+    description: 'Fly through math equations with Eliza!',
+    start_url: '.', display: 'fullscreen', orientation: 'portrait',
+    background_color: '#111827', theme_color: '#aa77ff',
+    icons: [
+      { src: icon192, sizes: '192x192', type: 'image/png' },
+      { src: icon512, sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
+    ]
+  };
+  const mLink = document.createElement('link');
+  mLink.rel = 'manifest';
+  mLink.href = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: 'application/json' }));
+  document.head.appendChild(mLink);
+  [['apple-mobile-web-app-capable','yes'],
+   ['apple-mobile-web-app-status-bar-style','black-translucent'],
+   ['apple-mobile-web-app-title','Flappy Eliza']
+  ].forEach(([n,c]) => { const m = document.createElement('meta'); m.name=n; m.content=c; document.head.appendChild(m); });
+  const al = document.createElement('link'); al.rel = 'apple-touch-icon'; al.href = icon192; document.head.appendChild(al);
+  const fl = document.createElement('link'); fl.rel = 'icon'; fl.type = 'image/png'; fl.href = icon64; document.head.appendChild(fl);
+}
+
+// ── Loop ──────────────────────────────────────────────────────────────────────
+function loop() { update(); render(); requestAnimationFrame(loop); }
+
+setupPWA();
+loop();
+</script>
+</body>
+</html>
