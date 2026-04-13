@@ -6,12 +6,23 @@
 <title>Flappy Eliza</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --game-width: 360;
+  --game-height: 600;
+  --game-ratio: calc(var(--game-width) / var(--game-height));
+}
+html, body {
+  width: 100%;
+  height: 100%;
+}
 body {
   background: #111827;
   display: flex;
   justify-content: center;
   align-items: center;
+  padding: 12px;
   min-height: 100vh;
+  overflow: hidden;
 }
 canvas {
   display: block;
@@ -21,6 +32,10 @@ canvas {
   box-shadow: 0 0 48px rgba(160, 120, 220, 0.28);
   cursor: pointer;
   touch-action: none;
+  width: min(92vw, calc((100vh - 24px) * 0.6), 420px);
+  aspect-ratio: var(--game-ratio);
+  height: auto;
+  max-height: calc(100vh - 24px);
 }
 </style>
 </head>
@@ -472,6 +487,18 @@ canvas.addEventListener('touchstart', e => {
   tap();
 }, { passive: false });
 
+const PWA = {
+  name: 'Flappy Eliza',
+  shortName: 'Flappy Eliza',
+  description: 'Fly through math equations with Eliza!',
+  startUrl: './flappy-eliza.html',
+  themeColor: '#aa77ff',
+  backgroundColor: '#111827',
+  appId: 'flappy-eliza',
+  iconTouchTitle: 'Flappy Eliza',
+  swUrl: './sw.js',
+};
+
 // ── PWA icon + manifest ───────────────────────────────────────────────────────
 function generateIcon(size) {
   const ic = document.createElement('canvas');
@@ -496,30 +523,53 @@ function generateIcon(size) {
   return ic.toDataURL('image/png');
 }
 
+function setMeta(name, content) {
+  const existing = document.querySelector(`meta[name="${name}"]`);
+  if (existing) {
+    existing.setAttribute('content', content);
+    return;
+  }
+  const meta = document.createElement('meta');
+  meta.name = name;
+  meta.content = content;
+  document.head.appendChild(meta);
+}
+
 function setupPWA() {
   const icon512 = generateIcon(512);
   const icon192 = generateIcon(192);
   const icon64  = generateIcon(64);
   const manifest = {
-    name: 'Flappy Eliza', short_name: 'Flappy Eliza',
-    description: 'Fly through math equations with Eliza!',
-    start_url: '.', display: 'fullscreen', orientation: 'portrait',
-    background_color: '#111827', theme_color: '#aa77ff',
+    name: PWA.name, short_name: PWA.shortName,
+    description: PWA.description,
+    id: PWA.appId,
+    start_url: PWA.startUrl,
+    scope: './',
+    display: 'fullscreen',
+    orientation: 'portrait',
+    background_color: PWA.backgroundColor,
+    theme_color: PWA.themeColor,
     icons: [
       { src: icon192, sizes: '192x192', type: 'image/png' },
       { src: icon512, sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
     ]
   };
+  const existingManifest = document.querySelector('link[rel="manifest"]');
+  if (existingManifest) existingManifest.remove();
   const mLink = document.createElement('link');
   mLink.rel = 'manifest';
   mLink.href = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: 'application/json' }));
   document.head.appendChild(mLink);
-  [['apple-mobile-web-app-capable','yes'],
-   ['apple-mobile-web-app-status-bar-style','black-translucent'],
-   ['apple-mobile-web-app-title','Flappy Eliza']
-  ].forEach(([n,c]) => { const m = document.createElement('meta'); m.name=n; m.content=c; document.head.appendChild(m); });
+  setMeta('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');
+  setMeta('theme-color', PWA.themeColor);
+  setMeta('apple-mobile-web-app-capable', 'yes');
+  setMeta('apple-mobile-web-app-status-bar-style', 'black-translucent');
+  setMeta('apple-mobile-web-app-title', PWA.iconTouchTitle);
   const al = document.createElement('link'); al.rel = 'apple-touch-icon'; al.href = icon192; document.head.appendChild(al);
   const fl = document.createElement('link'); fl.rel = 'icon'; fl.type = 'image/png'; fl.href = icon64; document.head.appendChild(fl);
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register(PWA.swUrl).catch(() => {});
+  }
 }
 
 // ── Loop ──────────────────────────────────────────────────────────────────────
